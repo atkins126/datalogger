@@ -38,7 +38,6 @@ implementation
 
 {$IF DEFINED(MSWINDOWS)}
 
-
 constructor TProviderListBox.Create(const AListBox: TCustomListBox; const AMaxLogLines: Integer = 0);
 begin
   inherited Create;
@@ -46,8 +45,8 @@ begin
   FListBox := AListBox;
   FMaxLogLines := AMaxLogLines;
 end;
-{$ENDIF}
 
+{$ENDIF}
 
 destructor TProviderListBox.Destroy;
 begin
@@ -62,6 +61,9 @@ var
   LRetryCount: Integer;
   LLines: Integer;
 begin
+  if not Assigned(FListBox) then
+    raise EDataLoggerException.Create('ListBox not defined!');
+
   if Length(ACache) = 0 then
     Exit;
 
@@ -77,16 +79,16 @@ begin
 
     LRetryCount := 0;
 
-    repeat
+    while True do
       try
-        if not Assigned(FListBox.Owner) then
+        if (csDestroying in FListBox.ComponentState) then
           Exit;
 
         try
           TThread.Synchronize(nil,
             procedure
             begin
-              if not Assigned(FListBox.Owner) then
+              if (csDestroying in FListBox.ComponentState) then
                 Exit;
 
               FListBox.Items.BeginUpdate;
@@ -98,7 +100,7 @@ begin
             TThread.Synchronize(nil,
               procedure
               begin
-                if not Assigned(FListBox.Owner) then
+                if (csDestroying in FListBox.ComponentState) then
                   Exit;
 
                 LLines := FListBox.Items.Count;
@@ -110,14 +112,14 @@ begin
               end);
           end;
         finally
-          if Assigned(FListBox.Owner) then
+          if not(csDestroying in FListBox.ComponentState) then
           begin
             FListBox.Items.EndUpdate;
 
             TThread.Synchronize(nil,
               procedure
               begin
-                if not Assigned(FListBox.Owner) then
+                if (csDestroying in FListBox.ComponentState) then
                   Exit;
 
                 FListBox.ItemIndex := FListBox.Items.Count - 1;
@@ -141,12 +143,9 @@ begin
             Break;
         end;
       end;
-    until False;
   end;
 end;
 {$ELSE}
-
-
 begin
 end;
 {$ENDIF}

@@ -17,7 +17,7 @@ type
   TDataLoggerProvider = class(TThread)
   private
     FEvent: TEvent;
-    FList: TList<TLoggerItem>;
+    FListLoggerItem: TList<TLoggerItem>;
     FLogFormat: string;
     FFormatTimestamp: string;
     FLogLevel: TLoggerType;
@@ -25,11 +25,9 @@ type
     FOnlyLogType: TLoggerTypes;
     FLogException: TOnLogException;
     FMaxRetry: Integer;
-
+    FCriticalSection: TCriticalSection;
     function ExtractCache: TArray<TLoggerItem>;
   protected
-    FCriticalSection: TCriticalSection;
-
     procedure Execute; override;
     procedure Save(const ACache: TArray<TLoggerItem>); virtual; abstract;
 
@@ -41,6 +39,7 @@ type
     function GetOnlyLogType: TLoggerTypes;
     function GetLogException: TOnLogException;
     function GetMaxRetry: Integer;
+    function CriticalSection: TCriticalSection;
 
     property LogException: TOnLogException read GetLogException;
 
@@ -53,6 +52,8 @@ type
     function SetOnlyLogType(const ALogType: TLoggerTypes): TDataLoggerProvider;
     function SetLogException(const AException: TOnLogException): TDataLoggerProvider;
     function SetMaxRetry(const AMaxRetry: Integer): TDataLoggerProvider;
+    function Clear: TDataLoggerProvider;
+    function NotifyEvent: TDataLoggerProvider;
 
     function AddCache(const AValues: TArray<TLoggerItem>): TDataLoggerProvider; overload;
     function AddCache(const AValue: TLoggerItem): TDataLoggerProvider; overload;
@@ -68,24 +69,23 @@ implementation
 constructor TDataLoggerProvider.Create;
 begin
   inherited Create(True);
-
-  SetLogFormat(TLoggerFormat.DEFAULT_LOG_FORMAT);
-  SetMaxRetry(3);
+  FreeOnTerminate := False;
 end;
 
 procedure TDataLoggerProvider.AfterConstruction;
 begin
   FCriticalSection := TCriticalSection.Create;
   FEvent := TEvent.Create;
-  FList := TList<TLoggerItem>.Create;
+  FListLoggerItem := TList<TLoggerItem>.Create;
 
-  FLogLevel := TLoggerType.All;
-  FDisableLogType := [];
-  FOnlyLogType := [TLoggerType.All];
+  SetLogFormat(TLoggerFormat.DEFAULT_LOG_FORMAT);
+  SetFormatTimestamp('yyyy-mm-dd hh:nn:ss:zzz');
+  SetLogLevel(TLoggerType.All);
+  SetDisableLogType([]);
+  SetOnlyLogType([TLoggerType.All]);
+  SetLogException(nil);
+  SetMaxRetry(5);
 
-  FFormatTimestamp := 'yyyy-mm-dd hh:nn:ss:zzz';
-
-  FreeOnTerminate := False;
   Start;
 end;
 
@@ -95,9 +95,9 @@ begin
   FEvent.SetEvent;
   WaitFor;
 
-  FList.DisposeOf;
-  FEvent.DisposeOf;
-  FCriticalSection.DisposeOf;
+  FListLoggerItem.Free;
+  FEvent.Free;
+  FCriticalSection.Free;
 end;
 
 procedure TDataLoggerProvider.Execute;
@@ -112,12 +112,7 @@ begin
 
     if LWait = wrSignaled then
     begin
-      FCriticalSection.Enter;
-      try
-        LCache := ExtractCache;
-      finally
-        FCriticalSection.Leave;
-      end;
+      LCache := ExtractCache;
 
       if Length(LCache) = 0 then
         Continue;
@@ -136,7 +131,6 @@ end;
 function TDataLoggerProvider.SetFormatTimestamp(const AFormatTimestamp: string): TDataLoggerProvider;
 begin
   Result := Self;
-
   FFormatTimestamp := AFormatTimestamp;
 end;
 
@@ -168,6 +162,31 @@ function TDataLoggerProvider.SetMaxRetry(const AMaxRetry: Integer): TDataLoggerP
 begin
   Result := Self;
   FMaxRetry := AMaxRetry;
+end;
+
+function TDataLoggerProvider.Clear: TDataLoggerProvider;
+begin
+  Result := Self;
+
+  FCriticalSection.Acquire;
+  try
+    FListLoggerItem.Clear;
+    FListLoggerItem.TrimExcess;
+  finally
+    FCriticalSection.Release;
+  end;
+end;
+
+function TDataLoggerProvider.NotifyEvent: TDataLoggerProvider;
+begin
+  Result := Self;
+
+  FCriticalSection.Acquire;
+  try
+    FEvent.SetEvent;
+  finally
+    FCriticalSection.Release;
+  end;
 end;
 
 function TDataLoggerProvider.ValidationBeforeSave(const ALogItem: TLoggerItem): Boolean;
@@ -222,6 +241,11 @@ begin
   Result := FMaxRetry;
 end;
 
+function TDataLoggerProvider.CriticalSection: TCriticalSection;
+begin
+  Result := FCriticalSection;
+end;
+
 function TDataLoggerProvider.AddCache(const AValues: TArray<TLoggerItem>): TDataLoggerProvider;
 var
   LItems: TArray<TLoggerItem>;
@@ -229,17 +253,16 @@ var
 begin
   Result := Self;
 
-  LItems := AValues;
-
-  FCriticalSection.Enter;
+  FCriticalSection.Acquire;
   try
-    for LItem in LItems do
-      FList.Add(LItem);
-  finally
-    FCriticalSection.Leave;
-  end;
+    LItems := AValues;
 
-  FEvent.SetEvent;
+    for LItem in LItems do
+      FListLoggerItem.Add(LItem);
+  finally
+    FEvent.SetEvent;
+    FCriticalSection.Release;
+  end;
 end;
 
 function TDataLoggerProvider.AddCache(const AValue: TLoggerItem): TDataLoggerProvider;
@@ -251,13 +274,14 @@ function TDataLoggerProvider.ExtractCache: TArray<TLoggerItem>;
 var
   LCache: TArray<TLoggerItem>;
 begin
-  FCriticalSection.Enter;
+  FCriticalSection.Acquire;
   try
-    LCache := FList.ToArray;
-    FList.Clear;
-    FList.TrimExcess;
+    LCache := FListLoggerItem.ToArray;
+
+    FListLoggerItem.Clear;
+    FListLoggerItem.TrimExcess;
   finally
-    FCriticalSection.Leave;
+    FCriticalSection.Release;
   end;
 
   Result := LCache;

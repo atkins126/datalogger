@@ -38,7 +38,6 @@ implementation
 
 {$IF DEFINED(MSWINDOWS)}
 
-
 constructor TProviderMemo.Create(const AMemo: TCustomMemo; const AMaxLogLines: Integer = 0);
 begin
   inherited Create;
@@ -46,8 +45,8 @@ begin
   FMemo := AMemo;
   FMaxLogLines := AMaxLogLines;
 end;
-{$ENDIF}
 
+{$ENDIF}
 
 destructor TProviderMemo.Destroy;
 begin
@@ -62,6 +61,9 @@ var
   LRetryCount: Integer;
   LLines: Integer;
 begin
+  if not Assigned(FMemo) then
+    raise EDataLoggerException.Create('Memo not defined!');
+
   if Length(ACache) = 0 then
     Exit;
 
@@ -77,9 +79,9 @@ begin
 
     LRetryCount := 0;
 
-    repeat
+    while True do
       try
-        if not Assigned(FMemo.Owner) then
+        if (csDestroying in FMemo.ComponentState) then
           Exit;
 
         FMemo.Lines.BeginUpdate;
@@ -87,7 +89,7 @@ begin
           TThread.Synchronize(nil,
             procedure
             begin
-              if not Assigned(FMemo.Owner) then
+              if (csDestroying in FMemo.ComponentState) then
                 Exit;
 
               FMemo.Lines.Add(LLog);
@@ -98,7 +100,7 @@ begin
             TThread.Synchronize(nil,
               procedure
               begin
-                if not Assigned(FMemo.Owner) then
+                if (csDestroying in FMemo.ComponentState) then
                   Exit;
 
                 LLines := FMemo.Lines.Count;
@@ -110,17 +112,19 @@ begin
               end);
           end;
         finally
-          if Assigned(FMemo.Owner) then
+          if not(csDestroying in FMemo.ComponentState) then
+          begin
             FMemo.Lines.EndUpdate;
 
-          TThread.Synchronize(nil,
-            procedure
-            begin
-              if not Assigned(FMemo.Owner) then
-                Exit;
+            TThread.Synchronize(nil,
+              procedure
+              begin
+                if (csDestroying in FMemo.ComponentState) then
+                  Exit;
 
-              SendMessage(FMemo.Handle, EM_LINESCROLL, 0, FMemo.Lines.Count);
-            end);
+                SendMessage(FMemo.Handle, EM_LINESCROLL, 0, FMemo.Lines.Count);
+              end);
+          end;
         end;
 
         Break;
@@ -139,13 +143,10 @@ begin
             Break;
         end;
       end;
-    until False;
   end;
 end;
 
 {$ELSE}
-
-
 begin
 end;
 {$ENDIF}

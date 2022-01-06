@@ -44,7 +44,7 @@ end;
 
 destructor TProviderEmail.Destroy;
 begin
-  FIdMessage.DisposeOf;
+  FIdMessage.Free;
   inherited;
 end;
 
@@ -74,12 +74,12 @@ begin
 
     FIdMessage.Body.Text := LString.Text;
   finally
-    LString.DisposeOf;
+    LString.Free;
   end;
 
   LRetryCount := 0;
 
-  repeat
+  while True do
     try
       if not FIdSMTP.Connected then
         FIdSMTP.Connect;
@@ -102,14 +102,12 @@ begin
           Break;
       end;
     end;
-  until False;
 
   try
     if FIdSMTP.Connected then
       FIdSMTP.Disconnect(False);
   except
   end;
-
 end;
 
 end.

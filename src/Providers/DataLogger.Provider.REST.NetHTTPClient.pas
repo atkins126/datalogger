@@ -94,7 +94,11 @@ begin
     if LItem.&Type = TLoggerType.All then
       Continue;
 
-    LLogItemREST.Stream := TLoggerLogFormat.AsStream(GetLogFormat, LItem, GetFormatTimestamp);
+    if Trim(LowerCase(FContentType)) = 'application/json' then
+      LLogItemREST.Stream := TLoggerLogFormat.AsStreamJsonObject(GetLogFormat, LItem)
+    else
+      LLogItemREST.Stream := TLoggerLogFormat.AsStream(GetLogFormat, LItem, GetFormatTimestamp);
+
     LLogItemREST.LogItem := LItem;
 
     LItemREST := Concat(LItemREST, [LLogItemREST]);
@@ -150,7 +154,10 @@ begin
 
     LHTTP := TNetHTTPClient.Create(nil);
   except
-    Exit;
+    if Assigned(AItemREST.Stream) then
+      AItemREST.Stream.Free;
+
+    Exit
   end;
 
   try
@@ -159,7 +166,7 @@ begin
     LHTTP.ResponseTimeout := 3000;
     LHTTP.AcceptCharSet := 'utf-8';
     LHTTP.AcceptEncoding := 'utf-8';
-    LHTTP.UserAgent := 'LoggerRest';
+    LHTTP.UserAgent := 'DataLoggerRest';
     LHTTP.ContentType := FContentType;
     LHTTP.Accept := FContentType;
 
@@ -175,7 +182,7 @@ begin
     if LURL.Trim.IsEmpty then
       raise EDataLoggerException.Create('URL is empty!');
 
-    repeat
+    while True do
       try
         if Self.Terminated then
           Exit;
@@ -208,15 +215,14 @@ begin
             Break;
         end;
       end;
-    until False;
   finally
-    LHTTP.DisposeOf;
+    LHTTP.Free;
 
     if Assigned(FSaveFinally) then
       FSaveFinally(AItemREST.LogItem, LResponseContent);
 
     if Assigned(AItemREST.Stream) then
-      AItemREST.Stream.DisposeOf;
+      AItemREST.Stream.Free;
   end;
 end;
 

@@ -90,21 +90,21 @@ class function TLoggerLogFormat.AsJsonObject(const ALogFormat: string; const AIt
     if ALogFormat.Contains(ALogKey) then
       Result.AddPair(AJSONKey, AJSONValue)
     else
-    begin
-      AJSONValue.DisposeOf;
-    end;
+      AJSONValue.Free;
   end;
 
 var
   I: Integer;
   LJO: TJsonObject;
+  LKey: string;
+  LValue: TJsonValue;
 begin
   Result := TJsonObject.Create;
 
-  Result.AddPair('timestamp', TJSONString.Create(DateToISO8601(AItem.TimeStamp)));
+  Result.AddPair('timestamp', TJSONString.Create(DateToISO8601(AItem.TimeStamp, False)));
 
   _Add(TLoggerFormat.LOG_THREADID, 'log_sequence', TJSONNumber.Create(AItem.Sequence));
-  _Add(TLoggerFormat.LOG_TIMESTAMP, 'log_datetime', TJSONString.Create(DateToISO8601(AItem.TimeStamp)));
+  _Add(TLoggerFormat.LOG_TIMESTAMP, 'log_datetime', TJSONString.Create(DateToISO8601(AItem.TimeStamp, False)));
   _Add(TLoggerFormat.LOG_THREADID, 'log_threadid', TJSONNumber.Create(AItem.ThreadID));
   _Add(TLoggerFormat.LOG_PROCESSID, 'log_processid', TJSONString.Create(AItem.ProcessId));
   _Add(TLoggerFormat.LOG_TYPE, 'log_type', TJSONString.Create(AItem.&Type.ToString));
@@ -120,9 +120,17 @@ begin
       if Assigned(LJO) then
         try
           for I := 0 to Pred(LJO.Count) do
-            Result.AddPair('log_' + LJO.Pairs[I].JsonString.Value, LJO.Pairs[I].JsonValue.Value);
+          begin
+            LKey := Format('${%s}',[LJO.Pairs[I].JsonString.Value]);
+
+            if ALogFormat.Contains(LKey) then
+            begin
+              LValue := LJO.Pairs[I].JsonValue.Clone as TJSONValue;
+              Result.AddPair(LJO.Pairs[I].JsonString.Value, LValue);
+            end;
+          end;
         finally
-          LJO.DisposeOf;
+          LJO.Free;
         end;
     except
     end;
@@ -146,7 +154,7 @@ begin
   try
     Result := LJO.ToString;
   finally
-    LJO.DisposeOf;
+    LJO.Free;
   end;
 end;
 
@@ -183,7 +191,7 @@ begin
           for I := 0 to Pred(LJO.Count) do
             LLog := _Add(Format('${%s}', [LJO.Pairs[I].JsonString.Value]), LJO.Pairs[I].JsonValue.Value);
         finally
-          LJO.DisposeOf;
+          LJO.Free;
         end;
     except
     end;
