@@ -11,12 +11,14 @@ interface
 
 uses
   DataLogger.Provider, DataLogger.Types,
-  System.SysUtils;
+  System.SysUtils, System.JSON;
 
 type
   TLoggerItem = DataLogger.Types.TLoggerItem;
 
   TExecuteEvents = reference to procedure(const ALogFormat: string; const AItem: TLoggerItem; const AFormatTimestamp: string);
+
+  TProviderEvents = class;
 
   TEventsConfig = class
   private
@@ -28,10 +30,8 @@ type
     FOnWarn: TExecuteEvents;
     FOnError: TExecuteEvents;
     FOnFatal: TExecuteEvents;
+    FOnCustom: TExecuteEvents;
     procedure Init;
-    class var FInstance: TEventsConfig;
-  protected
-    constructor Create;
   public
     function OnAny(const AEvent: TExecuteEvents): TEventsConfig;
     function OnTrace(const AEvent: TExecuteEvents): TEventsConfig;
@@ -41,11 +41,10 @@ type
     function OnWarn(const AEvent: TExecuteEvents): TEventsConfig;
     function OnError(const AEvent: TExecuteEvents): TEventsConfig;
     function OnFatal(const AEvent: TExecuteEvents): TEventsConfig;
+    function OnCustom(const AEvent: TExecuteEvents): TEventsConfig;
 
+    constructor Create;
     destructor Destroy; override;
-
-    class function New: TEventsConfig;
-    class destructor UnInitialize;
   end;
 
   TProviderEvents = class(TDataLoggerProvider)
@@ -54,7 +53,13 @@ type
   protected
     procedure Save(const ACache: TArray<TLoggerItem>); override;
   public
-    constructor Create(const AConfig: TEventsConfig);
+    function Config(const AValue: TEventsConfig): TProviderEvents;
+
+    procedure LoadFromJSON(const AJSON: string); override;
+    function ToJSON(const AFormat: Boolean = False): string; override;
+
+    constructor Create; overload;
+    constructor Create(const AConfig: TEventsConfig); overload; deprecated 'Use TProviderEvents.Create.Config(TEventsConfig.Create.OnAny(TExecuteEvents)) - This function will be removed in future versions';
     destructor Destroy; override;
   end;
 
@@ -62,26 +67,81 @@ implementation
 
 { TProviderEvents }
 
-constructor TProviderEvents.Create(const AConfig: TEventsConfig);
+constructor TProviderEvents.Create;
 begin
   inherited Create;
-  FConfig := AConfig;
+
+  Config(nil);
+end;
+
+constructor TProviderEvents.Create(const AConfig: TEventsConfig);
+begin
+  Create;
+
+  Config(AConfig);
 end;
 
 destructor TProviderEvents.Destroy;
 begin
+  if Assigned(FConfig) then
+    FConfig.Free;
+
   inherited;
+end;
+
+function TProviderEvents.Config(const AValue: TEventsConfig): TProviderEvents;
+begin
+  Result := Self;
+  FConfig := AValue;
+end;
+
+procedure TProviderEvents.LoadFromJSON(const AJSON: string);
+var
+  LJO: TJSONObject;
+begin
+  if AJSON.Trim.IsEmpty then
+    Exit;
+
+  try
+    LJO := TJSONObject.ParseJSONValue(AJSON) as TJSONObject;
+  except
+    on E: Exception do
+      Exit;
+  end;
+
+  if not Assigned(LJO) then
+    Exit;
+
+  try
+    SetJSONInternal(LJO);
+  finally
+    LJO.Free;
+  end;
+end;
+
+function TProviderEvents.ToJSON(const AFormat: Boolean): string;
+var
+  LJO: TJSONObject;
+begin
+  LJO := TJSONObject.Create;
+  try
+    ToJSONInternal(LJO);
+
+    Result := TLoggerJSON.Format(LJO, AFormat);
+  finally
+    LJO.Free;
+  end;
 end;
 
 procedure TProviderEvents.Save(const ACache: TArray<TLoggerItem>);
   procedure _Execute(const AEvent: TExecuteEvents; const AItem: TLoggerItem);
   begin
     if Assigned(AEvent) then
-      AEvent(GetLogFormat, AItem, GetFormatTimestamp);
+      AEvent(FLogFormat, AItem, FFormatTimestamp);
   end;
 
 var
-  LRetryCount: Integer;
+  LRetriesCount: Integer;
   LItem: TLoggerItem;
 begin
   if not Assigned(FConfig) then
@@ -92,13 +152,10 @@ begin
 
   for LItem in ACache do
   begin
-    if not ValidationBeforeSave(LItem) then
+    if LItem.InternalItem.TypeSlineBreak then
       Continue;
 
-    if LItem.&Type = TLoggerType.All then
-      Continue;
-
-    LRetryCount := 0;
+    LRetriesCount := 0;
 
     while True do
       try
@@ -117,6 +174,8 @@ begin
             _Execute(FConfig.FOnSuccess, LItem);
           TLoggerType.Fatal:
             _Execute(FConfig.FOnFatal, LItem);
+          TLoggerType.Custom:
+            _Execute(FConfig.FOnCustom, LItem);
         end;
 
         _Execute(FConfig.FOnAny, LItem);
@@ -125,15 +184,20 @@ begin
       except
         on E: Exception do
         begin
-          Inc(LRetryCount);
+          Inc(LRetriesCount);
 
-          if Assigned(LogException) then
-            LogException(Self, LItem, E, LRetryCount);
+          Sleep(50);
+
+          if Assigned(FLogException) then
+            FLogException(Self, LItem, E, LRetriesCount);
 
           if Self.Terminated then
             Exit;
 
-          if LRetryCount >= GetMaxRetry then
+          if LRetriesCount <= 0 then
+            Break;
+
+          if LRetriesCount >= FMaxRetries then
             Break;
         end;
       end
@@ -141,20 +205,6 @@ begin
 end;
 
 { TEventsConfig }
-
-class function TEventsConfig.New: TEventsConfig;
-begin
-  if not Assigned(FInstance) then
-    FInstance := TEventsConfig.Create;
-
-  Result := FInstance;
-end;
-
-class destructor TEventsConfig.UnInitialize;
-begin
-  if Assigned(FInstance) then
-    FInstance.Free;
-end;
 
 constructor TEventsConfig.Create;
 begin
@@ -164,6 +214,7 @@ end;
 destructor TEventsConfig.Destroy;
 begin
   Init;
+  inherited;
 end;
 
 procedure TEventsConfig.Init;
@@ -225,5 +276,19 @@ begin
   Result := Self;
   FOnFatal := AEvent;
 end;
+
+function TEventsConfig.OnCustom(const AEvent: TExecuteEvents): TEventsConfig;
+begin
+  Result := Self;
+  FOnFatal := AEvent;
+end;
+
+procedure ForceReferenceToClass(C: TClass);
+begin
+end;
+
+initialization
+
+ForceReferenceToClass(TProviderEvents);
 
 end.

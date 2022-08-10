@@ -5,56 +5,108 @@
   *************************************
 }
 
-// https://api.slack.com/tutorials/slack-apps-hello-world
+// https://api.slack.com/messaging/webhooks
 
 unit DataLogger.Provider.Slack;
 
 interface
 
 uses
-  DataLogger.Provider.REST.HTTPClient, DataLogger.Types,
+{$IF DEFINED(DATALOGGER_MATTERMOST_USE_INDY)}
+  DataLogger.Provider.REST.Indy,
+{$ELSEIF DEFINED(DATALOGGER_MATTERMOST_USE_NETHTTPCLIENT)}
+  DataLogger.Provider.REST.NetHTTPClient,
+{$ELSE}
+  DataLogger.Provider.REST.HTTPClient,
+{$ENDIF}
+  DataLogger.Types,
   System.SysUtils, System.Classes, System.JSON;
 
 type
+{$IF DEFINED(DATALOGGER_MATTERMOST_USE_INDY)}
+  TProviderSlack = class(TProviderRESTIndy)
+{$ELSEIF DEFINED(DATALOGGER_MATTERMOST_USE_NETHTTPCLIENT)}
+  TProviderSlack = class(TProviderRESTNetHTTPClient)
+{$ELSE}
   TProviderSlack = class(TProviderRESTHTTPClient)
+{$ENDIF}
   private
-    FChannel: string;
-    FUsername: string;
   protected
     procedure Save(const ACache: TArray<TLoggerItem>); override;
   public
-    constructor Create(const AServicesName: string; const AChannel: string = ''; const AUsername: string = ''); reintroduce;
+    function URL(const AValue: string): TProviderSlack;
+    procedure LoadFromJSON(const AJSON: string); override;
+    function ToJSON(const AFormat: Boolean = False): string; override;
+
+    constructor Create;
   end;
 
 implementation
 
 { TProviderSlack }
 
-constructor TProviderSlack.Create(const AServicesName: string; const AChannel: string = ''; const AUsername: string = '');
-var
-  LURL: string;
+constructor TProviderSlack.Create;
 begin
-  LURL := Format('https://hooks.slack.com/services/%s', [AServicesName]);
+  inherited Create;
 
-  FChannel := AChannel;
+  URL('https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX');
+  ContentType('application/json');
+end;
 
-  if not FChannel.Trim.IsEmpty then
-    if not FChannel.StartsWith('#') then
-      FChannel := '#' + AChannel;
+function TProviderSlack.URL(const AValue: string): TProviderSlack;
+begin
+  Result := Self;
+  inherited URL(AValue);
+end;
 
-  FUsername := AUsername;
+procedure TProviderSlack.LoadFromJSON(const AJSON: string);
+var
+  LJO: TJSONObject;
+begin
+  if AJSON.Trim.IsEmpty then
+    Exit;
 
-  inherited Create(LURL, 'application/json', '');
+  try
+    LJO := TJSONObject.ParseJSONValue(AJSON) as TJSONObject;
+  except
+    on E: Exception do
+      Exit;
+  end;
+
+  if not Assigned(LJO) then
+    Exit;
+
+  try
+    URL(LJO.GetValue<string>('url', inherited URL));
+
+    SetJSONInternal(LJO);
+  finally
+    LJO.Free;
+  end;
+end;
+
+function TProviderSlack.ToJSON(const AFormat: Boolean): string;
+var
+  LJO: TJSONObject;
+begin
+  LJO := TJSONObject.Create;
+  try
+    LJO.AddPair('url', inherited URL);
+
+    ToJSONInternal(LJO);
+
+    Result := TLoggerJSON.Format(LJO, AFormat);
+  finally
+    LJO.Free;
+  end;
 end;
 
 procedure TProviderSlack.Save(const ACache: TArray<TLoggerItem>);
 var
   LItemREST: TArray<TLogItemREST>;
-
   LItem: TLoggerItem;
   LLog: string;
   LJO: TJSONObject;
-
   LLogItemREST: TLogItemREST;
 begin
   LItemREST := [];
@@ -64,26 +116,18 @@ begin
 
   for LItem in ACache do
   begin
-    if not ValidationBeforeSave(LItem) then
+    if LItem.InternalItem.TypeSlineBreak then
       Continue;
 
-    if LItem.&Type = TLoggerType.All then
-      Continue;
-
-    LLog := TLoggerLogFormat.AsString(GetLogFormat, LItem, GetFormatTimestamp);
+    LLog := TLoggerLogFormat.AsString(FLogFormat, LItem, FFormatTimestamp);
 
     LJO := TJSONObject.Create;
     try
-      LJO.AddPair('text', TJSONString.Create(LLog));
-
-      if not FChannel.Trim.IsEmpty then
-        LJO.AddPair('channel', TJSONString.Create(FChannel));
-
-      if not FUsername.Trim.IsEmpty then
-        LJO.AddPair('username', TJSONString.Create(FUsername));
+      LJO.AddPair('text', LLog);
 
       LLogItemREST.Stream := TStringStream.Create(LJO.ToString, TEncoding.UTF8);
       LLogItemREST.LogItem := LItem;
+      LLogItemREST.URL := inherited URL;
     finally
       LJO.Free;
     end;
@@ -91,7 +135,15 @@ begin
     LItemREST := Concat(LItemREST, [LLogItemREST]);
   end;
 
-  InternalSave(TLoggerMethod.tlmPost, LItemREST);
+  InternalSave(TRESTMethod.tlmPost, LItemREST);
 end;
+
+procedure ForceReferenceToClass(C: TClass);
+begin
+end;
+
+initialization
+
+ForceReferenceToClass(TProviderSlack);
 
 end.

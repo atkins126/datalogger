@@ -12,102 +12,202 @@ interface
 uses
   DataLogger.Provider, DataLogger.Types,
   IdSMTP, IdMessage,
-  System.SysUtils, System.Classes;
+  System.SysUtils, System.Classes, System.JSON;
 
 type
   TProviderEmail = class(TDataLoggerProvider)
   private
     FIdSMTP: TIdSMTP;
-    FIdMessage: TIdMessage;
+    FFromAddress: string;
+    FToAddress: string;
+    FSubject: string;
   protected
     procedure Save(const ACache: TArray<TLoggerItem>); override;
   public
-    constructor Create(const AIdSMTP: TIdSMTP; const AFromAddress: string; const AToAddress: string; const ASubject: string = 'Logger');
-    destructor Destroy; override;
+    function IdSMTP(const AValue: TIdSMTP): TProviderEmail; overload;
+    function FromAddress(const AValue: string): TProviderEmail;
+    function ToAddress(const AValue: string): TProviderEmail;
+    function Subject(const AValue: string): TProviderEmail;
+
+    procedure LoadFromJSON(const AJSON: string); override;
+    function ToJSON(const AFormat: Boolean = False): string; override;
+
+    constructor Create;
   end;
 
 implementation
 
 { TProviderEmail }
 
-constructor TProviderEmail.Create(const AIdSMTP: TIdSMTP; const AFromAddress: string; const AToAddress: string; const ASubject: string = 'Logger');
+constructor TProviderEmail.Create;
 begin
   inherited Create;
 
-  FIdSMTP := AIdSMTP;
-  FIdMessage := TIdMessage.Create;
-
-  FIdMessage.From.Text := AFromAddress;
-  FIdMessage.Recipients.Add.Text := AToAddress;
-  FIdMessage.Subject := ASubject
+  IdSMTP(nil);
+  FromAddress('');
+  ToAddress('');
+  Subject('');
 end;
 
-destructor TProviderEmail.Destroy;
+function TProviderEmail.IdSMTP(const AValue: TIdSMTP): TProviderEmail;
 begin
-  FIdMessage.Free;
-  inherited;
+  Result := Self;
+  FIdSMTP := AValue;
+end;
+
+function TProviderEmail.FromAddress(const AValue: string): TProviderEmail;
+begin
+  Result := Self;
+  FFromAddress := AValue;
+end;
+
+function TProviderEmail.ToAddress(const AValue: string): TProviderEmail;
+begin
+  Result := Self;
+  FToAddress := AValue;
+end;
+
+function TProviderEmail.Subject(const AValue: string): TProviderEmail;
+begin
+  Result := Self;
+  FSubject := AValue;
+end;
+
+procedure TProviderEmail.LoadFromJSON(const AJSON: string);
+var
+  LJO: TJSONObject;
+begin
+  if AJSON.Trim.IsEmpty then
+    Exit;
+
+  try
+    LJO := TJSONObject.ParseJSONValue(AJSON) as TJSONObject;
+  except
+    on E: Exception do
+      Exit;
+  end;
+
+  if not Assigned(LJO) then
+    Exit;
+
+  try
+    FromAddress(LJO.GetValue<string>('from_address', FFromAddress));
+    ToAddress(LJO.GetValue<string>('to_address', FToAddress));
+    Subject(LJO.GetValue<string>('subject', FSubject));
+
+    SetJSONInternal(LJO);
+  finally
+    LJO.Free;
+  end;
+end;
+
+function TProviderEmail.ToJSON(const AFormat: Boolean): string;
+var
+  LJO: TJSONObject;
+begin
+  LJO := TJSONObject.Create;
+  try
+    LJO.AddPair('from_address', FFromAddress);
+    LJO.AddPair('to_address', FToAddress);
+    LJO.AddPair('subject', FSubject);
+
+    ToJSONInternal(LJO);
+
+    Result := TLoggerJSON.Format(LJO, AFormat);
+  finally
+    LJO.Free;
+  end;
 end;
 
 procedure TProviderEmail.Save(const ACache: TArray<TLoggerItem>);
 var
-  LRetryCount: Integer;
+  LIdMessage: TIdMessage;
+  LToAddress: TArray<string>;
+  LEmail: string;
+  LRetriesCount: Integer;
   LItem: TLoggerItem;
   LLog: string;
   LString: TStringList;
 begin
+  if not Assigned(FIdSMTP) then
+    raise EDataLoggerException.Create('IdSMTP not defined!');
+
   if Length(ACache) = 0 then
     Exit;
 
-  LString := TStringList.Create;
+  LIdMessage := TIdMessage.Create;
   try
-    for LItem in ACache do
-    begin
-      if not ValidationBeforeSave(LItem) then
-        Continue;
+    LIdMessage.From.Text := FFromAddress;
 
-      if LItem.&Type = TLoggerType.All then
-        Continue;
+    LToAddress := FToAddress.Trim.Split([';']);
+    for LEmail in LToAddress do
+      LIdMessage.Recipients.Add.Text := LEmail.Trim;
 
-      LLog := TLoggerLogFormat.AsString(GetLogFormat, LItem, GetFormatTimestamp);
-      LString.Add(LLog);
-    end;
+    LIdMessage.Subject := FSubject;
 
-    FIdMessage.Body.Text := LString.Text;
-  finally
-    LString.Free;
-  end;
-
-  LRetryCount := 0;
-
-  while True do
+    LString := TStringList.Create;
     try
-      if not FIdSMTP.Connected then
-        FIdSMTP.Connect;
-
-      FIdSMTP.Send(FIdMessage);
-
-      Break;
-    except
-      on E: Exception do
+      for LItem in ACache do
       begin
-        Inc(LRetryCount);
+        if LItem.InternalItem.TypeSlineBreak then
+          Continue;
 
-        if Assigned(LogException) then
-          LogException(Self, LItem, E, LRetryCount);
-
-        if Self.Terminated then
-          Exit;
-
-        if LRetryCount >= GetMaxRetry then
-          Break;
+        LLog := TLoggerLogFormat.AsString(FLogFormat, LItem, FFormatTimestamp);
+        LString.Add(LLog);
       end;
+
+      LIdMessage.Body.Text := LString.Text;
+    finally
+      LString.Free;
     end;
 
-  try
-    if FIdSMTP.Connected then
-      FIdSMTP.Disconnect(False);
-  except
+    LRetriesCount := 0;
+
+    while True do
+      try
+        if not FIdSMTP.Connected then
+          FIdSMTP.Connect;
+
+        FIdSMTP.Send(LIdMessage);
+
+        Break;
+      except
+        on E: Exception do
+        begin
+          Inc(LRetriesCount);
+
+          Sleep(50);
+
+          if Assigned(FLogException) then
+            FLogException(Self, LItem, E, LRetriesCount);
+
+          if Self.Terminated then
+            Exit;
+
+          if LRetriesCount <= 0 then
+            Break;
+
+          if LRetriesCount >= FMaxRetries then
+            Break;
+        end;
+      end;
+
+    try
+      if FIdSMTP.Connected then
+        FIdSMTP.Disconnect(False);
+    except
+    end;
+  finally
+    LIdMessage.Free;
   end;
 end;
+
+procedure ForceReferenceToClass(C: TClass);
+begin
+end;
+
+initialization
+
+ForceReferenceToClass(TProviderEmail);
 
 end.

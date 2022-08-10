@@ -11,7 +11,7 @@ interface
 
 uses
   DataLogger.Provider, DataLogger.Types,
-  System.SysUtils, System.Classes;
+  System.SysUtils, System.Classes, System.JSON;
 
 type
   TProviderMemory = class(TDataLoggerProvider)
@@ -20,7 +20,11 @@ type
   protected
     procedure Save(const ACache: TArray<TLoggerItem>); override;
   public
+    function Clear: TProviderMemory;
     function AsString: string;
+
+    procedure LoadFromJSON(const AJSON: string); override;
+    function ToJSON(const AFormat: Boolean = False): string; override;
 
     constructor Create;
     destructor Destroy; override;
@@ -42,9 +46,69 @@ begin
   inherited;
 end;
 
+function TProviderMemory.Clear: TProviderMemory;
+begin
+  Result := Self;
+
+  Lock;
+  try
+    FStringList.Clear;
+  finally
+    UnLock;
+  end;
+end;
+
+function TProviderMemory.AsString: string;
+begin
+  Lock;
+  try
+    Result := FStringList.Text;
+  finally
+    UnLock;
+  end;
+end;
+
+procedure TProviderMemory.LoadFromJSON(const AJSON: string);
+var
+  LJO: TJSONObject;
+begin
+  if AJSON.Trim.IsEmpty then
+    Exit;
+
+  try
+    LJO := TJSONObject.ParseJSONValue(AJSON) as TJSONObject;
+  except
+    on E: Exception do
+      Exit;
+  end;
+
+  if not Assigned(LJO) then
+    Exit;
+
+  try
+    SetJSONInternal(LJO);
+  finally
+    LJO.Free;
+  end;
+end;
+
+function TProviderMemory.ToJSON(const AFormat: Boolean = False): string;
+var
+  LJO: TJSONObject;
+begin
+  LJO := TJSONObject.Create;
+  try
+    ToJSONInternal(LJO);
+
+    Result := TLoggerJSON.Format(LJO, AFormat);
+  finally
+    LJO.Free;
+  end;
+end;
+
 procedure TProviderMemory.Save(const ACache: TArray<TLoggerItem>);
 var
-  LRetryCount: Integer;
+  LRetriesCount: Integer;
   LItem: TLoggerItem;
   LLog: string;
 begin
@@ -53,15 +117,12 @@ begin
 
   for LItem in ACache do
   begin
-    if not ValidationBeforeSave(LItem) then
+    if LItem.InternalItem.TypeSlineBreak then
       Continue;
 
-    if LItem.&Type = TLoggerType.All then
-      Continue;
+    LLog := TLoggerLogFormat.AsString(FLogFormat, LItem, FFormatTimestamp);
 
-    LLog := TLoggerLogFormat.AsString(GetLogFormat, LItem, GetFormatTimestamp);
-
-    LRetryCount := 0;
+    LRetriesCount := 0;
 
     while True do
       try
@@ -71,29 +132,32 @@ begin
       except
         on E: Exception do
         begin
-          Inc(LRetryCount);
+          Inc(LRetriesCount);
 
-          if Assigned(LogException) then
-            LogException(Self, LItem, E, LRetryCount);
+          Sleep(50);
+
+          if Assigned(FLogException) then
+            FLogException(Self, LItem, E, LRetriesCount);
 
           if Self.Terminated then
             Exit;
 
-          if LRetryCount >= GetMaxRetry then
+          if LRetriesCount <= 0 then
+            Break;
+
+          if LRetriesCount >= FMaxRetries then
             Break;
         end;
       end;
   end;
 end;
 
-function TProviderMemory.AsString: string;
+procedure ForceReferenceToClass(C: TClass);
 begin
-  CriticalSection.Acquire;
-  try
-    Result := FStringList.Text;
-  finally
-    CriticalSection.Release;
-  end;
 end;
+
+initialization
+
+ForceReferenceToClass(TProviderMemory);
 
 end.

@@ -5,6 +5,8 @@
   *************************************
 }
 
+// C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Administrative Tools\Event Viewer.lnk
+
 unit DataLogger.Provider.EventLog;
 
 interface
@@ -14,54 +16,91 @@ uses
 {$IF DEFINED(MSWINDOWS)}
   Vcl.SvcMgr, Winapi.Windows,
 {$ENDIF}
-  System.SysUtils, System.Types;
+  System.SysUtils, System.Types, System.JSON;
 
 type
   TProviderEventLog = class(TDataLoggerProvider)
   private
-{$IF DEFINED(MSWINDOWS)}
-    FEventLogger: TEventLogger;
-{$ENDIF}
+    FName: string;
   protected
     procedure Save(const ACache: TArray<TLoggerItem>); override;
   public
-    constructor Create(const AName: string = '');
-    destructor Destroy; override;
+    function Name(const AValue: string): TProviderEventLog;
+
+    procedure LoadFromJSON(const AJSON: string); override;
+    function ToJSON(const AFormat: Boolean = False): string; override;
+
+    constructor Create; overload;
   end;
 
 implementation
 
 { TProviderEventLog }
 
-constructor TProviderEventLog.Create(const AName: string = '');
-{$IF DEFINED(MSWINDOWS)}
-var
-  LName: string;
-{$ENDIF}
+constructor TProviderEventLog.Create;
 begin
   inherited Create;
 
-{$IF DEFINED(MSWINDOWS)}
-  if AName.Trim.IsEmpty then
-    LName := TLoggerUtils.AppName
-  else
-    LName := AName;
-
-  FEventLogger := TEventLogger.Create(LName);
-{$ENDIF}
+  Name(TLoggerUtils.AppName);
 end;
 
-destructor TProviderEventLog.Destroy;
+function TProviderEventLog.Name(const AValue: string): TProviderEventLog;
 begin
-{$IF DEFINED(MSWINDOWS)}
-  FEventLogger.Free;
-{$ENDIF}
+  Result := Self;
+
+  if AValue.Trim.IsEmpty then
+    FName := TLoggerUtils.AppName
+  else
+    FName := AValue;
+end;
+
+procedure TProviderEventLog.LoadFromJSON(const AJSON: string);
+var
+  LJO: TJSONObject;
+begin
+  if AJSON.Trim.IsEmpty then
+    Exit;
+
+  try
+    LJO := TJSONObject.ParseJSONValue(AJSON) as TJSONObject;
+  except
+    on E: Exception do
+      Exit;
+  end;
+
+  if not Assigned(LJO) then
+    Exit;
+
+  try
+    Name(LJO.GetValue<string>('name', FName));
+
+    SetJSONInternal(LJO);
+  finally
+    LJO.Free;
+  end;
+end;
+
+function TProviderEventLog.ToJSON(const AFormat: Boolean): string;
+var
+  LJO: TJSONObject;
+begin
+  LJO := TJSONObject.Create;
+  try
+    LJO.AddPair('name', FName);
+
+    ToJSONInternal(LJO);
+
+    Result := TLoggerJSON.Format(LJO, AFormat);
+  finally
+    LJO.Free;
+  end;
 end;
 
 procedure TProviderEventLog.Save(const ACache: TArray<TLoggerItem>);
 {$IF DEFINED(MSWINDOWS)}
 var
-  LRetryCount: Integer;
+  LEventLogger: TEventLogger;
+  LRetriesCount: Integer;
   LItem: TLoggerItem;
   LLog: string;
   LEventType: DWord;
@@ -69,57 +108,70 @@ begin
   if Length(ACache) = 0 then
     Exit;
 
-  for LItem in ACache do
-  begin
-    if not ValidationBeforeSave(LItem) then
-      Continue;
+  LEventLogger := TEventLogger.Create(FName);
+  try
+    for LItem in ACache do
+    begin
+      if LItem.InternalItem.TypeSlineBreak then
+        Continue;
 
-    if LItem.&Type = TLoggerType.All then
-      Continue;
+      LLog := TLoggerLogFormat.AsString(FLogFormat, LItem, FFormatTimestamp);
 
-    LLog := TLoggerLogFormat.AsString(GetLogFormat, LItem, GetFormatTimestamp);
-
-    case LItem.&Type of
-      TLoggerType.Debug:
+      case LItem.&Type of
+        TLoggerType.Info:
+          LEventType := EVENTLOG_INFORMATION_TYPE;
+        TLoggerType.Warn:
+          LEventType := EVENTLOG_WARNING_TYPE;
+        TLoggerType.Error:
+          LEventType := EVENTLOG_ERROR_TYPE;
+        TLoggerType.Success:
+          LEventType := EVENTLOG_SUCCESS;
+      else
         LEventType := EVENTLOG_INFORMATION_TYPE;
-      TLoggerType.Info:
-        LEventType := EVENTLOG_INFORMATION_TYPE;
-      TLoggerType.Warn:
-        LEventType := EVENTLOG_WARNING_TYPE;
-      TLoggerType.Error:
-        LEventType := EVENTLOG_ERROR_TYPE;
-      TLoggerType.Success:
-        LEventType := EVENTLOG_SUCCESS;
-    else
-      LEventType := EVENTLOG_INFORMATION_TYPE;
-    end;
-
-    LRetryCount := 0;
-
-    while True do
-      try
-        FEventLogger.LogMessage(LLog, LEventType, 0, 0);
-        Break;
-      except
-        on E: Exception do
-        begin
-          Inc(LRetryCount);
-
-          if Assigned(LogException) then
-            LogException(Self, LItem, E, LRetryCount);
-
-          if Self.Terminated then
-            Exit;
-
-          if LRetryCount >= GetMaxRetry then
-            Break;
-        end;
       end;
+
+      LRetriesCount := 0;
+
+      while True do
+        try
+          LEventLogger.LogMessage(LLog, LEventType, 0, 0);
+          Break;
+        except
+          on E: Exception do
+          begin
+            Inc(LRetriesCount);
+
+            Sleep(50);
+
+            if Assigned(FLogException) then
+              FLogException(Self, LItem, E, LRetriesCount);
+
+            if Self.Terminated then
+              Exit;
+
+            if LRetriesCount <= 0 then
+              Break;
+
+            if LRetriesCount >= FMaxRetries then
+              Break;
+          end;
+        end;
+    end;
+  finally
+    LEventLogger.Free;
   end;
 end;
 {$ELSE}
 begin
 end;
 {$ENDIF}
+
+procedure ForceReferenceToClass(C: TClass);
+begin
+end;
+
+initialization
+
+ForceReferenceToClass(TProviderEventLog);
 
 end.

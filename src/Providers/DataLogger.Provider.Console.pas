@@ -14,44 +14,172 @@ uses
 {$IF DEFINED(MSWINDOWS)}
   Winapi.Windows,
 {$ENDIF}
-  System.SysUtils;
+  System.SysUtils, System.JSON;
 
 type
+{$SCOPEDENUMS ON}
 {$IF DEFINED(MSWINDOWS)}
-  TConsoleColor = (Black, DarkBlue, DarkGreen, DarkCyan, DarkRed, DarkMagenta, DarkYellow, Gray, DarkGray, Blue, Green, Cyan, Red, Magenta, Yellow, White);
+  TColor = (Black, DarkBlue, DarkGreen, DarkCyan, DarkRed, DarkMagenta, DarkYellow, Gray, DarkGray, Blue, Green, Cyan, Red, Magenta, Yellow, White);
 {$ELSE}
-  TConsoleColor = (Black, DarkRed, DarkGreen, DarkYellow, DarkBlue, DarkMagenta, DarkCyan, Gray, DarkGray, Red, Green, Yellow, Blue, Magenta, Cyan, White);
+  TColor = (Black, DarkRed, DarkGreen, DarkYellow, DarkBlue, DarkMagenta, DarkCyan, Gray, DarkGray, Red, Green, Yellow, Blue, Magenta, Cyan, White);
 {$ENDIF}
+{$SCOPEDENUMS OFF}
 
   TProviderConsole = class(TDataLoggerProvider)
+  strict private
+  type
+    TColorConsole = record
+      Background: TColor;
+      Foreground: TColor;
+    end;
   private
     FUseColorInConsole: Boolean;
+    FColorTrace: TColorConsole;
+    FColorDebug: TColorConsole;
+    FColorInfo: TColorConsole;
+    FColorSuccess: TColorConsole;
+    FColorWarn: TColorConsole;
+    FColorError: TColorConsole;
+    FColorFatal: TColorConsole;
+    FColorCustom: TColorConsole;
     procedure WriteColor(const AType: TLoggerType; const ALog: string);
   protected
     procedure Save(const ACache: TArray<TLoggerItem>); override;
   public
-    constructor Create(const AUseColorInConsole: Boolean = True);
-    destructor Destroy; override;
+    function UseColorInConsole(const AValue: Boolean): TProviderConsole;
+    function ChangeColor(const ALogType: TLoggerType; const AColorBackground: TColor; const AColorForeground: TColor): TProviderConsole;
+
+    procedure LoadFromJSON(const AJSON: string); override;
+    function ToJSON(const AFormat: Boolean = False): string; override;
+
+    constructor Create;
   end;
 
 implementation
 
 { TProviderConsole }
 
-constructor TProviderConsole.Create(const AUseColorInConsole: Boolean = True);
+constructor TProviderConsole.Create;
 begin
   inherited Create;
-  FUseColorInConsole := AUseColorInConsole;
+
+  UseColorInConsole(True);
+  ChangeColor(TLoggerType.Trace, TColor.Black, TColor.Magenta);
+  ChangeColor(TLoggerType.Debug, TColor.Black, TColor.Cyan);
+  ChangeColor(TLoggerType.Info, TColor.Black, TColor.White);
+  ChangeColor(TLoggerType.Success, TColor.Black, TColor.Green);
+  ChangeColor(TLoggerType.Warn, TColor.Black, TColor.Yellow);
+  ChangeColor(TLoggerType.Error, TColor.Black, TColor.Red);
+  ChangeColor(TLoggerType.Fatal, TColor.Black, TColor.DarkRed);
+  ChangeColor(TLoggerType.Custom, TColor.Black, TColor.White);
 end;
 
-destructor TProviderConsole.Destroy;
+function TProviderConsole.UseColorInConsole(const AValue: Boolean): TProviderConsole;
 begin
-  inherited;
+  Result := Self;
+  FUseColorInConsole := AValue;
+end;
+
+function TProviderConsole.ChangeColor(const ALogType: TLoggerType; const AColorBackground: TColor; const AColorForeground: TColor): TProviderConsole;
+begin
+  Result := Self;
+
+  case ALogType of
+    TLoggerType.Trace:
+      begin
+        FColorTrace.Background := AColorBackground;
+        FColorTrace.Foreground := AColorForeground;
+      end;
+
+    TLoggerType.Debug:
+      begin
+        FColorDebug.Background := AColorBackground;
+        FColorDebug.Foreground := AColorForeground;
+      end;
+
+    TLoggerType.Info:
+      begin
+        FColorInfo.Background := AColorBackground;
+        FColorInfo.Foreground := AColorForeground;
+      end;
+
+    TLoggerType.Success:
+      begin
+        FColorSuccess.Background := AColorBackground;
+        FColorSuccess.Foreground := AColorForeground;
+      end;
+
+    TLoggerType.Warn:
+      begin
+        FColorWarn.Background := AColorBackground;
+        FColorWarn.Foreground := AColorForeground;
+      end;
+
+    TLoggerType.Error:
+      begin
+        FColorError.Background := AColorBackground;
+        FColorError.Foreground := AColorForeground;
+      end;
+
+    TLoggerType.Fatal:
+      begin
+        FColorFatal.Background := AColorBackground;
+        FColorFatal.Foreground := AColorForeground;
+      end;
+
+    TLoggerType.Custom:
+      begin
+        FColorCustom.Background := AColorBackground;
+        FColorCustom.Foreground := AColorForeground;
+      end;
+  end;
+end;
+
+procedure TProviderConsole.LoadFromJSON(const AJSON: string);
+var
+  LJO: TJSONObject;
+begin
+  if AJSON.Trim.IsEmpty then
+    Exit;
+
+  try
+    LJO := TJSONObject.ParseJSONValue(AJSON) as TJSONObject;
+  except
+    on E: Exception do
+      Exit;
+  end;
+
+  if not Assigned(LJO) then
+    Exit;
+
+  try
+    UseColorInConsole(LJO.GetValue<Boolean>('use_color_in_console', FUseColorInConsole));
+
+    SetJSONInternal(LJO);
+  finally
+    LJO.Free;
+  end;
+end;
+
+function TProviderConsole.ToJSON(const AFormat: Boolean): string;
+var
+  LJO: TJSONObject;
+begin
+  LJO := TJSONObject.Create;
+  try
+    LJO.AddPair('use_color_in_console', TJSONBool.Create(FUseColorInConsole));
+
+    ToJSONInternal(LJO);
+
+    Result := TLoggerJSON.Format(LJO, AFormat);
+  finally
+    LJO.Free;
+  end;
 end;
 
 procedure TProviderConsole.Save(const ACache: TArray<TLoggerItem>);
 var
-  LRetryCount: Integer;
+  LRetriesCount: Integer;
   LItem: TLoggerItem;
   LLog: string;
 begin
@@ -63,39 +191,41 @@ begin
 
   for LItem in ACache do
   begin
-    if not ValidationBeforeSave(LItem) then
-      Continue;
-
-    if LItem.&Type = TLoggerType.All then
+    if LItem.InternalItem.TypeSlineBreak then
     begin
       Writeln;
       Continue;
     end;
 
-    LLog := TLoggerLogFormat.AsString(GetLogFormat, LItem, GetFormatTimestamp);
+    LLog := TLoggerLogFormat.AsString(FLogFormat, LItem, FFormatTimestamp);
 
-    LRetryCount := 0;
+    LRetriesCount := 0;
 
     while True do
       try
-        if not FUseColorInConsole then
-          Writeln(LLog)
+        if FUseColorInConsole then
+          WriteColor(LItem.&Type, LLog)
         else
-          WriteColor(LItem.&Type, LLog);
+          Writeln(LLog);
 
         Break;
       except
         on E: Exception do
         begin
-          Inc(LRetryCount);
+          Inc(LRetriesCount);
 
-          if Assigned(LogException) then
-            LogException(Self, LItem, E, LRetryCount);
+          Sleep(50);
+
+          if Assigned(FLogException) then
+            FLogException(Self, LItem, E, LRetriesCount);
 
           if Self.Terminated then
             Exit;
 
-          if LRetryCount >= GetMaxRetry then
+          if LRetriesCount <= 0 then
+            Break;
+
+          if LRetriesCount >= FMaxRetries then
             Break;
         end;
       end;
@@ -103,65 +233,45 @@ begin
 end;
 
 procedure TProviderConsole.WriteColor(const AType: TLoggerType; const ALog: string);
-type
-  TColor = record
-    Background: TConsoleColor;
-    Foreground: TConsoleColor;
-  end;
-
-  function _Color(const ABackground: TConsoleColor; const AForeground: TConsoleColor): SmallInt;
+  function _Color(const AColor: TColorConsole): SmallInt;
   begin
-    Result := SmallInt(Integer(ABackground) shl 4) or Integer(AForeground);
+    Result := SmallInt(Integer(AColor.Background) shl 4) or Integer(AColor.Foreground);
   end;
 
-  function _ColorType: TColor;
+  function _ColorType: TColorConsole;
   begin
     case AType of
       TLoggerType.Trace:
-        begin
-          Result.Background := TConsoleColor.Black;
-          Result.Foreground := TConsoleColor.Magenta;
-        end;
+        Result := FColorTrace;
 
       TLoggerType.Debug:
-        begin
-          Result.Background := TConsoleColor.Black;
-          Result.Foreground := TConsoleColor.Cyan;
-        end;
+        Result := FColorDebug;
 
       TLoggerType.Info:
-        begin
-          Result.Background := TConsoleColor.Black;
-          Result.Foreground := TConsoleColor.White;
-        end;
-
-      TLoggerType.Warn:
-        begin
-          Result.Background := TConsoleColor.Black;
-          Result.Foreground := TConsoleColor.Yellow;
-        end;
-
-      TLoggerType.Error:
-        begin
-          Result.Background := TConsoleColor.Black;
-          Result.Foreground := TConsoleColor.Red;
-        end;
+        Result := FColorInfo;
 
       TLoggerType.Success:
-        begin
-          Result.Background := TConsoleColor.Black;
-          Result.Foreground := TConsoleColor.Green;
-        end;
+        Result := FColorSuccess;
+
+      TLoggerType.Warn:
+        Result := FColorWarn;
+
+      TLoggerType.Error:
+        Result := FColorError;
 
       TLoggerType.Fatal:
-        begin
-          Result.Background := TConsoleColor.Black;
-          Result.Foreground := TConsoleColor.DarkRed;
-        end;
+        Result := FColorFatal;
+
+      TLoggerType.Custom:
+        Result := FColorCustom;
+    else
+      Result := FColorInfo;
     end;
   end;
 
 {$IF DEFINED(MSWINDOWS)}
+
+
 var
   ConOut: THandle;
   BufInfo: TConsoleScreenBufferInfo;
@@ -169,11 +279,13 @@ begin
   ConOut := GetStdHandle(STD_OUTPUT_HANDLE);
   GetConsoleScreenBufferInfo(ConOut, BufInfo);
 
-  SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), _Color(_ColorType.Background, _ColorType.Foreground));
+  SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), _Color(_ColorType));
   Writeln(ALog);
   SetConsoleTextAttribute(ConOut, BufInfo.wAttributes);
 end;
 {$ELSEIF DEFINED(LINUX)}
+
+
 var
   LColor: Integer;
 begin
@@ -187,9 +299,20 @@ begin
   Write(#27'[0m');
 end;
 {$ELSE}
+
+
 begin
   Writeln(ALog);
 end;
 {$ENDIF}
+
+
+procedure ForceReferenceToClass(C: TClass);
+begin
+end;
+
+initialization
+
+ForceReferenceToClass(TProviderConsole);
 
 end.

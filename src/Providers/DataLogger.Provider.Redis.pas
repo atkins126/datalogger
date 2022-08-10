@@ -5,6 +5,8 @@
   *************************************
 }
 
+// https://github.com/danieleteti/delphiredisclient
+
 unit DataLogger.Provider.Redis;
 
 interface
@@ -12,45 +14,120 @@ interface
 uses
   DataLogger.Provider, DataLogger.Types,
   Redis.Commons, Redis.Client, Redis.NetLib.INDY,
-  System.SysUtils;
+  System.SysUtils, System.JSON;
 
 type
   TProviderRedis = class(TDataLoggerProvider)
   private
+    FHost: string;
+    FPort: Integer;
     FKeyPrefix: string;
     FMaxSize: Int64;
-    FRedisClient: IRedisClient;
-    FConnected: Boolean;
   protected
     procedure Save(const ACache: TArray<TLoggerItem>); override;
   public
-    constructor Create(const AHost: string = '127.0.0.1'; const APort: Integer = 6379; const AKeyPrefix: string = 'DataLogger'; const AMaxSize: Int64 = 10000);
-    destructor Destroy; override;
+    function Host(const AValue: string): TProviderRedis;
+    function Port(const AValue: Integer): TProviderRedis;
+    function KeyPrefix(const AValue: string): TProviderRedis;
+    function MaxSize(const AValue: Int64): TProviderRedis;
+
+    procedure LoadFromJSON(const AJSON: string); override;
+    function ToJSON(const AFormat: Boolean = False): string; override;
+
+    constructor Create;
   end;
 
 implementation
 
 { TProviderRedis }
 
-constructor TProviderRedis.Create(const AHost: string = '127.0.0.1'; const APort: Integer = 6379; const AKeyPrefix: string = 'DataLogger'; const AMaxSize: Int64 = 10000);
+constructor TProviderRedis.Create;
 begin
   inherited Create;
 
-  FRedisClient := TRedisClient.Create(AHost, APort);
-  FConnected := False;
-
-  FKeyPrefix := AKeyPrefix;
-  FMaxSize := AMaxSize;
+  Host('127.0.0.1');
+  Port(6379);
+  KeyPrefix('DataLoggerRedis');
+  MaxSize(10000);
 end;
 
-destructor TProviderRedis.Destroy;
+function TProviderRedis.Host(const AValue: string): TProviderRedis;
 begin
-  inherited;
+  Result := Self;
+  FHost := AValue;
+end;
+
+function TProviderRedis.Port(const AValue: Integer): TProviderRedis;
+begin
+  Result := Self;
+  FPort := AValue;
+end;
+
+function TProviderRedis.KeyPrefix(const AValue: string): TProviderRedis;
+begin
+  Result := Self;
+  FKeyPrefix := AValue;
+end;
+
+function TProviderRedis.MaxSize(const AValue: Int64): TProviderRedis;
+begin
+  Result := Self;
+  FMaxSize := AValue;
+end;
+
+procedure TProviderRedis.LoadFromJSON(const AJSON: string);
+var
+  LJO: TJSONObject;
+begin
+  if AJSON.Trim.IsEmpty then
+    Exit;
+
+  try
+    LJO := TJSONObject.ParseJSONValue(AJSON) as TJSONObject;
+  except
+    on E: Exception do
+      Exit;
+  end;
+
+  if not Assigned(LJO) then
+    Exit;
+
+  try
+    Host(LJO.GetValue<string>('host', FHost));
+    Port(LJO.GetValue<Integer>('port', FPort));
+    KeyPrefix(LJO.GetValue<string>('key_prefix', FKeyPrefix));
+    MaxSize(LJO.GetValue<Integer>('max_size', FMaxSize));
+
+    SetJSONInternal(LJO);
+  finally
+    LJO.Free;
+  end;
+end;
+
+function TProviderRedis.ToJSON(const AFormat: Boolean): string;
+var
+  LJO: TJSONObject;
+begin
+  LJO := TJSONObject.Create;
+  try
+    LJO.AddPair('host', FHost);
+    LJO.AddPair('port', TJSONNumber.Create(FPort));
+    LJO.AddPair('key_prefix', FKeyPrefix);
+    LJO.AddPair('max_size', FMaxSize);
+
+    ToJSONInternal(LJO);
+
+    Result := TLoggerJSON.Format(LJO, AFormat);
+  finally
+    LJO.Free;
+  end;
 end;
 
 procedure TProviderRedis.Save(const ACache: TArray<TLoggerItem>);
 var
-  LRetryCount: Integer;
+  LRedisClient: IRedisClient;
+  LConnected: Boolean;
+  LRetriesCount: Integer;
   LKey: string;
   LItem: TLoggerItem;
   LLog: string;
@@ -58,64 +135,77 @@ begin
   if Length(ACache) = 0 then
     Exit;
 
-  LKey := FKeyPrefix + '::DataLogger';
+  LKey := FKeyPrefix + '::DataLoggerRedis::';
+
+  LRedisClient := TRedisClient.Create(FHost, FPort);
+  LConnected := False;
 
   for LItem in ACache do
   begin
-    if not ValidationBeforeSave(LItem) then
+    if LItem.InternalItem.TypeSlineBreak then
       Continue;
 
-    if LItem.&Type = TLoggerType.All then
-      Continue;
+    LLog := TLoggerLogFormat.AsString(FLogFormat, LItem, FFormatTimestamp);
 
-    LLog := TLoggerLogFormat.AsString(GetLogFormat, LItem, GetFormatTimestamp);
-
-    LRetryCount := 0;
+    LRetriesCount := 0;
 
     while True do
       try
-        if not FConnected then
+        if not LConnected then
         begin
-          FRedisClient.Connect;
-          FConnected := True;
+          LRedisClient.Connect;
+          LConnected := True;
         end;
 
-        FRedisClient.RPUSH(LKey, [LLog]);
+        LRedisClient.RPUSH(LKey, [LLog]);
 
         Break;
       except
         on E: Exception do
         begin
-          if FConnected then
+          if LConnected then
           begin
             try
               try
-                FRedisClient.Disconnect;
+                LRedisClient.Disconnect;
               except
               end;
             finally
-              FConnected := False;
+              LConnected := False;
             end;
           end;
 
-          Inc(LRetryCount);
+          Inc(LRetriesCount);
 
-          if Assigned(LogException) then
-            LogException(Self, LItem, E, LRetryCount);
+          Sleep(50);
+
+          if Assigned(FLogException) then
+            FLogException(Self, LItem, E, LRetriesCount);
 
           if Self.Terminated then
             Exit;
 
-          if LRetryCount >= GetMaxRetry then
+          if LRetriesCount <= 0 then
+            Break;
+
+          if LRetriesCount >= FMaxRetries then
             Break;
         end;
       end;
   end;
 
   try
-    FRedisClient.LTRIM(LKey, -FMaxSize, -1);
+    LRedisClient.LTRIM(LKey, -FMaxSize, -1);
   except
   end;
 end;
+
+procedure ForceReferenceToClass(C: TClass);
+begin
+end;
+
+initialization
+
+ForceReferenceToClass(TProviderRedis);
 
 end.
